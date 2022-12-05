@@ -18,25 +18,15 @@
 #include "kmod_header.h"
 
 #define SUCCESS 0
-#define BUF_LENGHT 1024
+
  
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_DESCRIPTION("ioctl_driver");
 MODULE_VERSION("1.0");
  
-int pid = 0;
-static struct class *dev_class;
-static struct cdev my_cdev;
+struct class *dev_class;
+struct cdev my_cdev;
 dev_t dev = 0;
-
-struct vm_area_struct* vma;
-struct vm_area_struct* vma_next;
-int is_new = 1;
-
-int string_id = 0;
-
-struct pci_dev_request pci_dev_req;
-struct pci_dev* device;
 
 
 
@@ -48,40 +38,45 @@ static int device_open(struct inode *inode, struct file *file) {
 static int device_release(struct inode *inode, struct file *file) { 
     pr_info("device_release(%p,%p)\n", inode, file); 
     return SUCCESS; 
-} 
-
-static struct vm_area_struct* get_nth_struct(int order) {
-	struct vm_area_struct* cur = vma;
-	while (order > 0 && cur != NULL) {
-		cur = cur->vm_next;
-		order -= 1;
-	}
-	return cur;
-}
-
-static void move_to_next_vm_area(void) {
-    if (is_new == 1) {
-        vma_next = vma;
-        is_new = 0;
-    } else {
-        vma_next = vma_next->vm_next;
-    }
 }
 
 static long device_ioctl(struct file *file, unsigned int ioctl_num, unsigned long arg) { 
+    static int pid = 0;
     long to_return = SUCCESS;
+    static struct vm_area_struct* vma;
+    static struct vm_area_struct* vma_next;
+    static int is_new = 1;
+
+    static int string_id = 0;
+
+    static struct pci_dev_request pci_dev_req;
+    static struct pci_dev* device;
+
     switch(ioctl_num) {
         case WR_PID:
-            copy_from_user(&pid, (int*)arg, sizeof(pid));
-            struct task_struct* tsk = pid_task(find_vpid(pid), PIDTYPE_PID);
+            struct task_struct* tsk;
+            if (copy_from_user(&pid, (int*) arg, sizeof(int))) {
+                pr_err("Error while copying pid from user");
+                return -EFAULT;
+            }
+            tsk = pid_task(find_vpid(pid), PIDTYPE_PID);
             vma = tsk->mm->mmap;
             vma_next = NULL;
             is_new = 1;
             pr_info("pid = %d", pid);
             break;
         case RD_NEXT_VM_AREA:
-            move_to_next_vm_area();
             struct vm_message msge = (struct vm_message){0};
+
+            if (is_new == 1) {
+                vma_next = vma;
+                is_new = 0;
+            } else {
+                if (vma_next != NULL) {
+                    vma_next = vma_next->vm_next;
+                }
+            }
+
             if (vma_next == NULL) {
                 msge.vai = (struct vm_area_info){0};
                 msge.area_num = -1;
@@ -96,13 +91,17 @@ static long device_ioctl(struct file *file, unsigned int ioctl_num, unsigned lon
                 msge.area_num = 0;
             }
             if (copy_to_user((struct vm_message*) arg, &msge, sizeof(struct vm_message)) ) {
-                pr_err("Data Read : Err!\n");
+                pr_err("Error while copying vm_area_info to user");
+                to_return = -EFAULT;
             }
             break;
         case WR_PCI_DEV_PARAMS:
-            copy_from_user(&pci_dev_req, (struct pci_dev_request*)arg, sizeof(struct pci_dev_request));
+            if (copy_from_user(&pci_dev_req, (struct pci_dev_request*) arg, sizeof(struct pci_dev_request))) {
+                pr_err("Error while copying pci_dev_request from user");
+                return -EFAULT;
+            }
             pr_info("vendor_id = %d, device_id = %d", pci_dev_req.vendor_id, pci_dev_req.device_id);
-            device = pci_get_device(pci_dev_req.vendor_id, pci_dev_req.device_id, NULL);ls
+            device = pci_get_device(pci_dev_req.vendor_id, pci_dev_req.device_id, NULL);
             pr_info("device = %p", device);
             break;
         case RD_PCI_DEV:
@@ -115,15 +114,19 @@ static long device_ioctl(struct file *file, unsigned int ioctl_num, unsigned lon
                 pci_device_info.device_id = device->device;
                 pci_device_info.vendor_id = device->vendor;
                 pci_device_info.class = device->class;
-                // pci_dev_info->device_name = pci_name(pci_dev);
                 pci_dev_msg.pci_dev = pci_device_info;
-                // copy_to_user((struct pci_dev_info*) arg, pci_dev_info, sizeof(struct pci_dev_info));
             }
             pr_info("Reading pci_struct");
-            copy_to_user((struct pci_dev_message*) arg, &pci_dev_msg, sizeof(struct pci_dev_message));
+            if (copy_to_user((struct pci_dev_message*) arg, &pci_dev_msg, sizeof(struct pci_dev_message)) ) {
+                pr_err("Error while copying pci_dev_info to user");
+                to_return = -EFAULT;
+            }
             break;
         case WR_STRING_ID:
-            copy_from_user(&string_id, (int*)arg, sizeof(string_id));
+            if (copy_from_user(&string_id, (int*) arg, sizeof(int))) {
+                pr_err("Error while copying string_id from user");
+                return -EFAULT;
+            }
             break;
         case RD_STRING_LENGTH:
             unsigned int length;
@@ -133,30 +136,34 @@ static long device_ioctl(struct file *file, unsigned int ioctl_num, unsigned lon
                     length = strlen(pci_name(device));
                     break;
                 case PATH_NAME:
-                    if (vma_next->vm_file == NULL) {
+                    if (vma_next == NULL ||  vma_next->vm_file == NULL || vma_next->vm_file->f_path.dentry == NULL
+                    || vma_next->vm_file->f_path.dentry->d_iname == NULL) {
                         length = 0;
                     } else {
-                        length = strlen(vma_next->vm_file->f_path.dentry->d_name.name);
+                        length = strlen(vma_next->vm_file->f_path.dentry->d_iname);
                     }
                     break;
                 default:
                     length = 0;
                     break;
                 }
-            copy_to_user((unsigned int*) arg, &length, sizeof(length));
+            if (copy_to_user((unsigned int*) arg, &length, sizeof(unsigned int)) ) {
+                pr_err("Error while copying string length to user");
+                to_return = -EFAULT;
+            }
             break;
         case RD_STRING:
             const char* string;
             switch (string_id) {
                 case DRIVER_NAME:
-                    pr_info("device: %d", device == NULL);
                     string = pci_name(device);
                     break;
                 case PATH_NAME:
-                    if (vma_next->vm_file == NULL) {
+                    if (vma_next == NULL ||  vma_next->vm_file == NULL || vma_next->vm_file->f_path.dentry == NULL
+                    || vma_next->vm_file->f_path.dentry->d_iname == NULL) {
                         string = "";
                     } else {
-                        string = vma_next->vm_file->f_path.dentry->d_name.name;
+                        string = vma_next->vm_file->f_path.dentry->d_iname;
                     }
                     break;
                 default:
@@ -164,7 +171,10 @@ static long device_ioctl(struct file *file, unsigned int ioctl_num, unsigned lon
                     break;
             }
             pr_info("String: %s\n", string);
-            copy_to_user((char*) arg, string, strlen(string));
+            if (copy_to_user((char*) arg, string, strlen(string))) {
+                pr_err("Error while copying string to user");
+                to_return = -EFAULT;
+            }
             break;
         default:
             pr_info("Default\n");
@@ -182,8 +192,9 @@ static struct file_operations fops = {
 
  
 static int __init ioctl_mod_init(void) {
+    int res;
     printk(KERN_INFO "ioctl_mod: module loaded.\n");
-    int res = alloc_chrdev_region(&dev, 0, 1, "nice_dev");
+    res = alloc_chrdev_region(&dev, 0, 1, "nice_dev");
     if (res < 0) {
         pr_err("Cannot allocate major number\n");
         return -1;

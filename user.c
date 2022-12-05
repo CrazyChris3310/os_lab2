@@ -11,7 +11,6 @@
 struct vm_area_info* get_area_struct(int fd, int pid) {
 	struct vm_area_info* area = NULL;
 	struct vm_area_info* current = area;
-	int i = 0;
 	int c = 0;
     struct vm_message buffer = {0};
     ioctl(fd, WR_PID, &pid);
@@ -30,8 +29,9 @@ struct vm_area_info* get_area_struct(int fd, int pid) {
             *current = buffer.vai;
             unsigned int length;
             ioctl(fd, RD_STRING_LENGTH, &length);
-            current->name = malloc(length);
+            current->name = malloc(length + 1);
             ioctl(fd, RD_STRING, current->name);
+            current->name[length] = '\0';
 		}
 	} while (c == 0);
 	return area;
@@ -66,8 +66,9 @@ struct pci_dev_info* get_pci_dev(int fd, int vendor_id, int device_id) {
 
     unsigned int length;
     ioctl(fd, RD_STRING_LENGTH, &length);
-    pci_dev_info->device_name = malloc(length);
+    pci_dev_info->device_name = malloc(length + 1);
     ioctl(fd, RD_STRING, pci_dev_info->device_name);
+    pci_dev_info->device_name[length] = '\0';
 
     return pci_dev_info;
 }
@@ -80,7 +81,8 @@ void free_pci_dev(struct pci_dev_info* pci_dev_info) {
 int main(int argc, char *argv[]) {
 
     if (argc < 4) {
-        printf("Usage: <pid> <vendor> <device>");
+        printf("Usage: <pid> <vendor> <device>\n");
+        return 0;
     }
 
     int fd;
@@ -111,11 +113,11 @@ int main(int argc, char *argv[]) {
         printf("There are no devices with vendor_id=%d and device_id=%d\n", vendor_id, device_id);
     } else {
         printf("\npci_dev:\n");
-        printf("vendor: %d\n", device_info->vendor_id);
-        printf("device: %d\n", device_info->device_id);
-        printf("driver: %d\n", device_info->class);
+        printf("vendor: %x\n", device_info->vendor_id);
+        printf("device: %x\n", device_info->device_id);
+        printf("class: %x\n", device_info->class);
         printf("device_name: %s\n", device_info->device_name);
-        free(device_info);
+        free_pci_dev(device_info);
     }
 
     close(fd);
